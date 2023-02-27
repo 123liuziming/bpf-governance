@@ -2,7 +2,7 @@
 #include <net/sock.h>
 #include <bcc/proto.h>
 #include <uapi/linux/bpf.h>
-
+#include <linux/string.h>  
 #define IP_TCP 	6
 #define ETH_HLEN 14
 #define MAX_STR_LEN 2048
@@ -30,6 +30,8 @@ struct method_value {
 
 struct long_str {
 	char inner_str[MAX_STR_LEN];
+	int index;
+	int align;
 };
 
 
@@ -40,11 +42,8 @@ BPF_HASH(p_int2Str, u32, char);
 BPF_HASH(method_map, struct session_key, struct method_value);
 BPF_HASH(path_map, struct session_key, struct long_str);
 BPF_HASH(session_str_map, struct session_key, struct long_str);
+BPF_HASH(session_str_index_map, struct session_key, int);
 BPF_PERCPU_ARRAY(string_arr, struct long_str);
-
-BPF_DEVMAP(devmap, 1);
-
-
 
 static inline bool is_http(char p[]) {
 	//HTTP
@@ -73,7 +72,6 @@ static inline bool is_http(char p[]) {
 	}
 	return false;
 }
-
 
 int http_filter(struct __sk_buff *skb) {
 
@@ -146,6 +144,9 @@ int http_filter(struct __sk_buff *skb) {
 			goto DONE;
 		}
 		session_str = string_arr.lookup(&key1);
+		if (session_str) {
+			session_str->index = 0;
+		}
 	}
 	int length = MAX_STR_LEN;
 	if (length > payload_length) {
@@ -158,20 +159,20 @@ int http_filter(struct __sk_buff *skb) {
 			break;
 		}
 		bpf_skb_load_bytes(skb, payload_offset, p, 8);
-		if (p[0] == 'G' && p[1] == 'E' && p[2] == 'T') {
-			goto DROP;
-		}
 		payload_offset += 8;
+		unsigned int index = session_str->index;
+		index %= MAX_STR_LEN;
 		if (session_str) {
-			session_str->inner_str[i << 3] = p[0];
-			session_str->inner_str[(i << 3) + 1] = p[1];
-			session_str->inner_str[(i << 3) + 2] = p[2];
-			session_str->inner_str[(i << 3) + 3] = p[3];
-			session_str->inner_str[(i << 3) + 4] = p[4];
-			session_str->inner_str[(i << 3) + 5] = p[5];
-			session_str->inner_str[(i << 3) + 6] = p[6];
-			session_str->inner_str[(i << 3) + 7] = p[7];
+			memcpy(session_str->inner_str + index, p, 8);
+			session_str->index += 8;
+			if (bytes_read > length) {
+				break;
+			}
 		}
+	}
+
+	if (session_str) {
+		session_str_map.update(&session_key, session_str);
 	}
 
 	bpf_trace_printk("It is an HTTP request %s \n", session_str->inner_str);

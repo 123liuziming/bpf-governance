@@ -23,22 +23,22 @@ import pyroute2
 MAX_STR_LEN = 2048
 
 class LongStr(ct.Structure):
-    _fields_ = [("inner_str", ct.c_char * MAX_STR_LEN)]
+    _fields_ = [("inner_str", ct.c_char * MAX_STR_LEN), ("index", ct.c_int), ("align", ct.c_int)]
+
+ipr = pyroute2.IPRoute()
+ipdb = pyroute2.IPDB(nl=ipr)
+ifc = ipdb.interfaces.eth0
 
 try:
     bpf = BPF(src_file = "http_parse.c",debug = 0)
     print("allocate memory for ebpf strings")
     counts = bpf.get_table("string_arr")
     for i in range(3):
-      counts[i] = LongStr(bytes(MAX_STR_LEN))
+      counts[i] = LongStr(bytes(MAX_STR_LEN), 0, 0)
 
     print("allocate memory for ebpf string pool finish!")
 
     http_func = bpf.load_func("http_filter", BPF.SCHED_CLS)
-
-    ipr = pyroute2.IPRoute()
-    ipdb = pyroute2.IPDB(nl=ipr)
-    ifc = ipdb.interfaces.eth0
 
     #ipr.tc("add", "clsact", ifc.index)
     ipr.tc("add", "ingress", ifc.index)
@@ -49,4 +49,6 @@ try:
     except KeyboardInterrupt:
         pass
 finally:
-    ipr.link("del", index=ifc.index)
+    #ipr.tc("del-filter", 'clsact', ifc.index, 'ffff:fff3')
+    ipr.tc("del", "ingress", ifc.index)
+    #ipr.tc("del-filter", 'ingress', ifc.index)
