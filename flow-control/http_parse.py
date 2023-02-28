@@ -21,9 +21,13 @@ import ctypes as ct
 import pyroute2
 
 MAX_STR_LEN = 2048
+MAX_PATH_LEN = 256
 
 class LongStr(ct.Structure):
     _fields_ = [("inner_str", ct.c_char * MAX_STR_LEN), ("index", ct.c_int), ("align", ct.c_int)]
+class LongStr(ct.Structure):
+    _fields_ = [("inner_str", ct.c_char * MAX_PATH_LEN), ("length", ct.c_int), ("qps", ct.c_int)]
+
 
 ipr = pyroute2.IPRoute()
 ipdb = pyroute2.IPDB(nl=ipr)
@@ -33,18 +37,16 @@ try:
     bpf = BPF(src_file = "http_parse.c",debug = 0)
     print("allocate memory for ebpf strings")
     counts = bpf.get_table("string_arr")
-    for i in range(3):
-      if i == 1:
-        counts[i] = LongStr("/get" + bytes(MAX_STR_LEN - 3), 0, 0)
-      else :
-        counts[i] = LongStr(bytes(MAX_STR_LEN), 0, 0)
+    counts[0] = LongStr(bytes(MAX_STR_LEN), 0, 0)
+    path_rules = bpf.get_table("path_rules")
+    path_rules[0] = LongStr(bytes("/get" + (MAX_PATH_LEN - 4) * ' ', encoding="utf-8"), 4, 0)
 
     print("allocate memory for ebpf string pool finish!")
 
     http_func = bpf.load_func("http_filter", BPF.SCHED_CLS)
 
-    #ipr.tc("add", "clsact", ifc.index)
-    ipr.tc("add", "ingress", ifc.index)
+    ipr.tc("add", "clsact", ifc.index)
+    #ipr.tc("add", "ingress", ifc.index)
     ipr.tc("add-filter", "bpf", ifc.index, ":1", fd=http_func.fd, name=http_func.name, parent="ffff:fff3", classid=1, direct_action=True)
     try:
         while True:
@@ -53,5 +55,6 @@ try:
         pass
 finally:
     #ipr.tc("del-filter", 'clsact', ifc.index, 'ffff:fff3')
-    ipr.tc("del", "ingress", ifc.index)
+    #ipr.tc("del", "ingress", ifc.index)
+    ipr.tc("del", "clsact", ifc.index)
     #ipr.tc("del-filter", 'ingress', ifc.index)
