@@ -45,15 +45,21 @@ struct path_rule {
 	int qps;
 };
 
+struct inv_cnt_with_lock {
+	struct bpf_spin_lock semaphore;
+	u64 count;
+};
 
 // key is session, value is the http header string
 BPF_ARRAY(path_rules, struct path_rule);
-BPF_HASH(p_int2Str, u32, char);
-
 BPF_HASH(method_map, struct session_key, struct method_value);
 BPF_HASH(path_map, struct session_key, struct long_str);
 BPF_HASH(session_str_map, struct session_key, struct long_str);
 BPF_PERCPU_ARRAY(string_arr, struct long_str);
+BPF_ARRAY(lock_map, struct inv_cnt_with_lock);
+BPF_ARRAY(ts_map, u64);
+BPF_ARRAY(inv_map, u64);
+
 
 static inline int is_http(char p[]) {
 	//HTTP
@@ -165,6 +171,8 @@ int http_filter(struct __sk_buff *skb) {
 	}
 
 	int bytes_read = 0;
+	struct inv_cnt_with_lock init_lock = {0};
+	struct inv_cnt_with_lock *l = lock_map.lookup_or_try_init(&key1, &init_lock);
 	for (i = 0; i < 256; ++i) {
 		bytes_read += 8;
 		if (bytes_read > length) {
@@ -174,9 +182,11 @@ int http_filter(struct __sk_buff *skb) {
 		payload_offset += 8;
 		unsigned int index = session_str->index;
 		index %= MAX_STR_LEN;
-		if (session_str) {
+		if (session_str && l) {
+			bpf_spin_lock(&l->semaphore);
 			memcpy(session_str->inner_str + index, p, 8);
 			session_str->index += 8;
+			bpf_spin_unlock(&l->semaphore);
 			if (bytes_read > length) {
 				break;
 			}
@@ -189,12 +199,14 @@ int http_filter(struct __sk_buff *skb) {
 		return 0;
 	}
 
-	bpf_trace_printk("pat str is %s\n", pat->path_str);
+	// 是否被限流计数
+	bool count = false;
 	for (i = 0; i < 256; ++i) {
 		bpf_probe_read_kernel(p, 1, session_str->inner_str + first + i);
 		bpf_probe_read_kernel(p + 1, 1, pat->path_str + i);
 		if (t_idx >= pat->length) {
 			bpf_trace_printk("Match! %d %d %d\n", first, p[0], p[1]);
+			count = true;
 			break;
 		}
 		if (p[0] == p[1]) {
@@ -204,8 +216,38 @@ int http_filter(struct __sk_buff *skb) {
 		t_idx = 0;
 	}
 
+	// record time
+	if (count) {
+		u64 ns = bpf_ktime_get_boot_ns();
+		u64* now = ts_map.lookup_or_try_init(&key1, &ns);
+		if (now) {
+			*now = ns;
+			bpf_trace_printk("Time is %llu\n", *now);
+		}
+	}
+	
+
+	u64 init_inv = 0;
+	u64* inv = inv_map.lookup_or_try_init(&key1, &init_inv);
+	if (l && count) {
+		bpf_spin_lock(&l->semaphore);
+		if (inv) {
+			++*inv;
+		}
+		bpf_spin_unlock(&l->semaphore);
+	}
+
+	if (inv) {
+		if (*inv > pat->qps) {
+			bpf_trace_printk("Inv larger than QPS, need to be limited\n", *inv);
+		}
+		bpf_trace_printk("Inv is %llu\n", *inv);
+	}
+	
 	if (session_str) {
-		session_str_map.update(&session_key, session_str);	
+		if (count || session_str->index >= MAX_STR_LEN) {
+			session_str->index = 0;
+		}
 	}
 
 	return 0;
