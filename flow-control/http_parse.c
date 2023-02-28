@@ -1,11 +1,16 @@
-#include <uapi/linux/ptrace.h>
-#include <net/sock.h>
+#include <linux/ptrace.h>
 #include <bcc/proto.h>
+#include <uapi/linux/bpf_common.h>
 #include <uapi/linux/bpf.h>
-#include <linux/string.h>  
+
 #define IP_TCP 	6
 #define ETH_HLEN 14
 #define MAX_STR_LEN 2048
+#define MAX_PATH_LEN 256
+
+
+#define METHOD_FLAG 0
+#define PATH_FLAG 1
 
 struct session_key {
 	u32 src_ip;               //source ip
@@ -34,43 +39,48 @@ struct long_str {
 	int align;
 };
 
+struct path_rule {
+	char path_str[MAX_PATH_LEN];
+	int length;
+	int qps;
+};
+
 
 // key is session, value is the http header string
-BPF_HASH(path_rules, struct path_key, u8);
+BPF_ARRAY(path_rules, struct path_rule);
 BPF_HASH(p_int2Str, u32, char);
 
 BPF_HASH(method_map, struct session_key, struct method_value);
 BPF_HASH(path_map, struct session_key, struct long_str);
 BPF_HASH(session_str_map, struct session_key, struct long_str);
-BPF_HASH(session_str_index_map, struct session_key, int);
 BPF_PERCPU_ARRAY(string_arr, struct long_str);
 
-static inline bool is_http(char p[]) {
+static inline int is_http(char p[]) {
 	//HTTP
 	if ((p[0] == 'H') && (p[1] == 'T') && (p[2] == 'T') && (p[3] == 'P')) {
-		return true;
+		return 9;
 	}
 	//GET
 	if ((p[0] == 'G') && (p[1] == 'E') && (p[2] == 'T')) {
-		return true;
+		return 4;
 	}
 	//POST
 	if ((p[0] == 'P') && (p[1] == 'O') && (p[2] == 'S') && (p[3] == 'T')) {
-		return true;
+		return 5;
 	}
 	//PUT
 	if ((p[0] == 'P') && (p[1] == 'U') && (p[2] == 'T')) {
-		return true;
+		return 4;
 	}
 	//DELETE
 	if ((p[0] == 'D') && (p[1] == 'E') && (p[2] == 'L') && (p[3] == 'E') && (p[4] == 'T') && (p[5] == 'E')) {
-		return true;
+		return 7;
 	}
 	//HEAD
 	if ((p[0] == 'H') && (p[1] == 'E') && (p[2] == 'A') && (p[3] == 'D')) {
-		return true;
+		return 5;
 	}
-	return false;
+	return 0;
 }
 
 int http_filter(struct __sk_buff *skb) {
@@ -136,11 +146,12 @@ int http_filter(struct __sk_buff *skb) {
 
 	struct long_str* session_str = session_str_map.lookup(&session_key);
 	char p[8];
-	int key1 = 0, key2 = 0, key3 = 0;
+	int key1 = 0;
 	int i = 0;
+	int first = 0;
 	bpf_skb_load_bytes(skb, payload_offset, p, 8);
 	if (!session_str) {
-		if (!is_http(p)) {
+		if (!(first = is_http(p))) {
 			goto DONE;
 		}
 		session_str = string_arr.lookup(&key1);
@@ -152,6 +163,7 @@ int http_filter(struct __sk_buff *skb) {
 	if (length > payload_length) {
 		length = payload_length;
 	}
+
 	int bytes_read = 0;
 	for (i = 0; i < 256; ++i) {
 		bytes_read += 8;
@@ -171,17 +183,37 @@ int http_filter(struct __sk_buff *skb) {
 		}
 	}
 
-	if (session_str) {
-		session_str_map.update(&session_key, session_str);
+	int t_idx = 0;
+	struct path_rule* pat = path_rules.lookup(&key1);
+	if (!pat) {
+		return 0;
 	}
 
-	bpf_trace_printk("It is an HTTP request %s \n", session_str->inner_str);
-	return TC_ACT_OK;
+	bpf_trace_printk("pat str is %s\n", pat->path_str);
+	for (i = 0; i < 256; ++i) {
+		bpf_probe_read_kernel(p, 1, session_str->inner_str + first + i);
+		bpf_probe_read_kernel(p + 1, 1, pat->path_str + i);
+		if (t_idx >= pat->length) {
+			bpf_trace_printk("Match! %d %d %d\n", first, p[0], p[1]);
+			break;
+		}
+		if (p[0] == p[1]) {
+			t_idx++;
+			continue;
+		}
+		t_idx = 0;
+	}
+
+	if (session_str) {
+		session_str_map.update(&session_key, session_str);	
+	}
+
+	return 0;
 
 	DROP:
-	return TC_ACT_SHOT;
+	return 2;
 
 	DONE:
-	return TC_ACT_OK;
+	return 0;
 
 }

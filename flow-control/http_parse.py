@@ -34,7 +34,10 @@ try:
     print("allocate memory for ebpf strings")
     counts = bpf.get_table("string_arr")
     for i in range(3):
-      counts[i] = LongStr(bytes(MAX_STR_LEN), 0, 0)
+      if i == 1:
+        counts[i] = LongStr("/get" + bytes(MAX_STR_LEN - 3), 0, 0)
+      else :
+        counts[i] = LongStr(bytes(MAX_STR_LEN), 0, 0)
 
     print("allocate memory for ebpf string pool finish!")
 
