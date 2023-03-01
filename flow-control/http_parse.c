@@ -173,7 +173,7 @@ int http_filter(struct __sk_buff *skb) {
 	int bytes_read = 0;
 	struct inv_cnt_with_lock init_lock = {0};
 	struct inv_cnt_with_lock *l = lock_map.lookup_or_try_init(&key1, &init_lock);
-	for (i = 0; i < 256; ++i) {
+	for (i = 0; i < 32; ++i) {
 		bytes_read += 8;
 		if (bytes_read > length) {
 			break;
@@ -205,9 +205,11 @@ int http_filter(struct __sk_buff *skb) {
 		bpf_probe_read_kernel(p, 1, session_str->inner_str + first + i);
 		bpf_probe_read_kernel(p + 1, 1, pat->path_str + i);
 		if (t_idx >= pat->length) {
-			bpf_trace_printk("Match! %d %d %d\n", first, p[0], p[1]);
-			count = true;
-			break;
+			if (p[0] == ' ' || p[0] == '?') {
+				bpf_trace_printk("Match! %d %d %d\n", first, p[0], p[1]);
+				count = true;
+				break;
+			}
 		}
 		if (p[0] == p[1]) {
 			t_idx++;
@@ -249,6 +251,8 @@ int http_filter(struct __sk_buff *skb) {
 			session_str->index = 0;
 		}
 	}
+
+	bpf_trace_printk("HTTP REQUEST %d %s\n", first, session_str->inner_str);
 
 	return 0;
 
