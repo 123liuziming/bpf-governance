@@ -21,12 +21,14 @@ import ctypes as ct
 import pyroute2
 
 MAX_STR_LEN = 2048
-MAX_PATH_LEN = 256
+MAX_PATH_LEN = 64
 
 class LongStr(ct.Structure):
     _fields_ = [("inner_str", ct.c_char * MAX_STR_LEN), ("index", ct.c_int), ("align", ct.c_int)]
-class LongStr(ct.Structure):
-    _fields_ = [("inner_str", ct.c_char * MAX_PATH_LEN), ("length", ct.c_int), ("qps", ct.c_int)]
+class PathRule(ct.Structure):
+    _fields_ = [("path_str", ct.c_char * MAX_PATH_LEN), ("length", ct.c_int), ("qps", ct.c_int)]
+class PathRuleKey(ct.Structure):
+    _fields_ = [("path_str", ct.c_char * MAX_PATH_LEN)]
 
 
 ipr = pyroute2.IPRoute()
@@ -39,7 +41,9 @@ try:
     counts = bpf.get_table("string_arr")
     counts[0] = LongStr(bytes(MAX_STR_LEN), 0, 0)
     path_rules = bpf.get_table("path_rules")
-    path_rules[0] = LongStr(bytes("/" + (MAX_PATH_LEN - 1) * ' ', encoding="utf-8"), 1, 0)
+
+    path_rules[PathRuleKey(bytes("/", encoding="utf-8"))] = PathRule(bytes("/" + (MAX_PATH_LEN - 1) * ' ', encoding="utf-8"), 1, 0)
+    path_rules[PathRuleKey(bytes("/aa", encoding="utf-8"))] = PathRule(bytes("/" + (MAX_PATH_LEN - 1) * ' ', encoding="utf-8"), 1, 0)
 
     print("allocate memory for ebpf string pool finish!")
 

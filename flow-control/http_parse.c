@@ -6,7 +6,7 @@
 #define IP_TCP 	6
 #define ETH_HLEN 14
 #define MAX_STR_LEN 2048
-#define MAX_PATH_LEN 256
+#define MAX_PATH_LEN 64
 
 
 #define METHOD_FLAG 0
@@ -45,13 +45,17 @@ struct path_rule {
 	int qps;
 };
 
+struct path_rule_key {
+	char path_str[MAX_PATH_LEN];
+};
+
 struct inv_cnt_with_lock {
 	struct bpf_spin_lock semaphore;
 	u64 count;
 };
 
 // key is session, value is the http header string
-BPF_ARRAY(path_rules, struct path_rule);
+BPF_HASH(path_rules, struct path_rule_key, struct path_rule);
 BPF_HASH(method_map, struct session_key, struct method_value);
 BPF_HASH(path_map, struct session_key, struct long_str);
 BPF_HASH(session_str_map, struct session_key, struct long_str);
@@ -163,8 +167,11 @@ int http_filter(struct __sk_buff *skb) {
 		session_str = string_arr.lookup(&key1);
 		if (session_str) {
 			session_str->index = 0;
+			session_str_map.insert(&session_key, session_str);
 		}
 	}
+
+
 	int length = MAX_STR_LEN;
 	if (length > payload_length) {
 		length = payload_length;
@@ -193,42 +200,38 @@ int http_filter(struct __sk_buff *skb) {
 		}
 	}
 
-	int t_idx = 0;
-	struct path_rule* pat = path_rules.lookup(&key1);
-	if (!pat) {
-		return 0;
-	}
+	struct path_rule_key prk = {0};
 
 	// 是否被限流计数
 	bool count = false;
-	for (i = 0; i < 256; ++i) {
+	int j = 0;
+	// 读path，直到遇到空格或者?
+	for (i = 0; i < 64; ++i) {
 		bpf_probe_read_kernel(p, 1, session_str->inner_str + first + i);
-		bpf_probe_read_kernel(p + 1, 1, pat->path_str + i);
-		if (t_idx >= pat->length) {
-			if (p[0] == ' ' || p[0] == '?') {
-				bpf_trace_printk("Match! %d %d %d\n", first, p[0], p[1]);
-				count = true;
-				break;
-			}
+		if (p[0] == ' ' || p[0] == '?') {
+			break;
 		}
-		if (p[0] == p[1]) {
-			t_idx++;
-			continue;
-		}
-		t_idx = 0;
+		prk.path_str[i] = p[0];
 	}
 
+	// 去MAP里面匹配
+	struct path_rule* pat = path_rules.lookup(&prk);
+	if (!pat) {
+		bpf_trace_printk("No Match prk %s\n", prk.path_str);
+		return 0;
+	} else {
+		bpf_trace_printk("Match prk %s\n", prk.path_str);
+	}
+	
 	// record time
 	if (count) {
 		u64 ns = bpf_ktime_get_boot_ns();
 		u64* now = ts_map.lookup_or_try_init(&key1, &ns);
 		if (now) {
 			*now = ns;
-			bpf_trace_printk("Time is %llu\n", *now);
 		}
 	}
 	
-
 	u64 init_inv = 0;
 	u64* inv = inv_map.lookup_or_try_init(&key1, &init_inv);
 	if (l && count) {
@@ -241,18 +244,20 @@ int http_filter(struct __sk_buff *skb) {
 
 	if (inv) {
 		if (*inv > pat->qps) {
-			bpf_trace_printk("Inv larger than QPS, need to be limited\n", *inv);
+			// TODO: Rate limit action
 		}
-		bpf_trace_printk("Inv is %llu\n", *inv);
 	}
 	
 	if (session_str) {
 		if (count || session_str->index >= MAX_STR_LEN) {
 			session_str->index = 0;
 		}
+		session_str_map.update(&session_key, session_str);
 	}
 
-	bpf_trace_printk("HTTP REQUEST %d %s\n", first, session_str->inner_str);
+	if (session_key.dst_port == 8000) {
+        bpf_trace_printk("0 HTTP %u %u %d\n", session_key.dst_port, session_key.dst_ip, count);
+    }
 
 	return 0;
 
