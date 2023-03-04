@@ -2,6 +2,8 @@
 #include <bcc/proto.h>
 #include <uapi/linux/bpf_common.h>
 #include <uapi/linux/bpf.h>
+#include <linux/ip.h>
+
 
 #define IP_TCP 	6
 #define ETH_HLEN 14
@@ -54,16 +56,20 @@ struct inv_cnt_with_lock {
 	u64 count;
 };
 
+struct block_exception {
+	u32 src_ip;
+	unsigned short src_port;
+};
+
+
 // key is session, value is the http header string
 BPF_HASH(path_rules, struct path_rule_key, struct path_rule);
-BPF_HASH(method_map, struct session_key, struct method_value);
-BPF_HASH(path_map, struct session_key, struct long_str);
 BPF_HASH(session_str_map, struct session_key, struct long_str);
 BPF_PERCPU_ARRAY(string_arr, struct long_str);
 BPF_ARRAY(lock_map, struct inv_cnt_with_lock);
 BPF_ARRAY(ts_map, u64);
 BPF_ARRAY(inv_map, u64);
-
+BPF_RINGBUF_OUTPUT(rb, 1 << 4);
 
 static inline int is_http(char p[]) {
 	//HTTP
@@ -124,10 +130,8 @@ int http_filter(struct __sk_buff *skb) {
     if (ip_header_length < sizeof(*ip)) {
         goto DONE;
     }
-
     //shift cursor forward for dynamic ip header size
     void *_ = cursor_advance(cursor, (ip_header_length-sizeof(*ip)));
-
 	struct tcp_t *tcp = cursor_advance(cursor, sizeof(*tcp));
 
 	//retrieve ip src/dest and port src/dest of current packet
@@ -146,6 +150,7 @@ int http_filter(struct __sk_buff *skb) {
 	payload_offset = ETH_HLEN + ip_header_length + tcp_header_length;
 	payload_length = ip->tlen - ip_header_length - tcp_header_length;
 
+
 	//http://stackoverflow.com/questions/25047905/http-request-minimum-size-in-bytes
 	//minimum length of http request is always geater than 7 bytes
 	//avoid invalid access memory
@@ -158,10 +163,10 @@ int http_filter(struct __sk_buff *skb) {
 	char p[8];
 	int key1 = 0;
 	int i = 0;
-	int first = 0;
 	bpf_skb_load_bytes(skb, payload_offset, p, 8);
+	int first = is_http(p);
 	if (!session_str) {
-		if (!(first = is_http(p))) {
+		if (!first) {
 			goto DONE;
 		}
 		session_str = string_arr.lookup(&key1);
@@ -170,7 +175,6 @@ int http_filter(struct __sk_buff *skb) {
 			session_str_map.insert(&session_key, session_str);
 		}
 	}
-
 
 	int length = MAX_STR_LEN;
 	if (length > payload_length) {
@@ -207,20 +211,22 @@ int http_filter(struct __sk_buff *skb) {
 	int j = 0;
 	// 读path，直到遇到空格或者?
 	for (i = 0; i < 64; ++i) {
-		bpf_probe_read_kernel(p, 1, session_str->inner_str + first + i);
-		if (p[0] == ' ' || p[0] == '?') {
+		char c;
+		bpf_probe_read_kernel(&c, 1, session_str->inner_str + first + i);
+		if (c == ' ' || c == '?') {
 			break;
 		}
-		prk.path_str[i] = p[0];
+		prk.path_str[i] = c;
 	}
 
 	// 去MAP里面匹配
 	struct path_rule* pat = path_rules.lookup(&prk);
 	if (!pat) {
-		bpf_trace_printk("No Match prk %s\n", prk.path_str);
+		bpf_trace_printk("No Match prk %s %d\n", prk.path_str, first);
 		return 0;
 	} else {
-		bpf_trace_printk("Match prk %s\n", prk.path_str);
+		bpf_trace_printk("Match prk %s %d\n", prk.path_str, first);
+		count = true;
 	}
 	
 	// record time
@@ -237,14 +243,19 @@ int http_filter(struct __sk_buff *skb) {
 	if (l && count) {
 		bpf_spin_lock(&l->semaphore);
 		if (inv) {
-			++*inv;
+			*inv = *inv + 1;
 		}
 		bpf_spin_unlock(&l->semaphore);
 	}
 
+	bool over = false;
 	if (inv) {
 		if (*inv > pat->qps) {
 			// TODO: Rate limit action
+			//void *ip_ptr = skb_network_header(skb);
+        	// 修改目标IP地址为192.168.10.10
+			bpf_trace_printk("Rate was limited %x \n");
+			over = true;
 		}
 	}
 	
@@ -254,15 +265,17 @@ int http_filter(struct __sk_buff *skb) {
 		}
 		session_str_map.update(&session_key, session_str);
 	}
-
-	if (session_key.dst_port == 8000) {
-        bpf_trace_printk("0 HTTP %u %u %d\n", session_key.dst_port, session_key.dst_ip, count);
-    }
-
+	struct block_exception event = {};
+	if (over) {
+		goto DROP;
+	}
 	return 0;
 
 	DROP:
-	return 2;
+	event.src_port = session_key.src_port;
+	event.src_ip = session_key.src_ip;
+	rb.ringbuf_output(&event, sizeof(event), 0);
+	return 4;
 
 	DONE:
 	return 0;
