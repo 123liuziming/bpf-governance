@@ -67,7 +67,7 @@ def hex2ip(ip):
 def check_block_event():
     try:
         while True:
-            bpf.ring_buffer_consume()
+            bpf.ring_buffer_poll()
             time.sleep(0.5)
     except KeyboardInterrupt:
         sys.exit()
