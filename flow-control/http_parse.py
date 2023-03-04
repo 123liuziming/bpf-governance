@@ -30,7 +30,7 @@ MAX_PATH_LEN = 64
 class LongStr(ct.Structure):
     _fields_ = [("inner_str", ct.c_char * MAX_STR_LEN), ("index", ct.c_int), ("align", ct.c_int)]
 class PathRule(ct.Structure):
-    _fields_ = [("path_str", ct.c_char * MAX_PATH_LEN), ("length", ct.c_int), ("qps", ct.c_int)]
+    _fields_ = [("path_str", ct.c_char * MAX_PATH_LEN), ("length", ct.c_int), ("qps", ct.c_int), ("interval", ct.c_uint64)]
 class PathRuleKey(ct.Structure):
     _fields_ = [("path_str", ct.c_char * MAX_PATH_LEN)]
 
@@ -45,7 +45,7 @@ def send_rst(ctx, data, size):
         if rst_map.__contains__(key):
             return
         rst_map[key] = True
-        output = subprocess.check_output(['tcpkill', '-9', 'host', src_ip, "and", "port", src_port], timeout=5, shell=False)
+        output = subprocess.check_output(['tcpkill', '-9', 'host', src_ip, "and", "port", src_port], timeout=2, shell=False)
         del rst_map[key]
     except subprocess.TimeoutExpired as e:
         print("Command timed out after {} seconds".format(e.timeout))
@@ -77,8 +77,8 @@ try:
     counts[0] = LongStr(bytes(MAX_STR_LEN), 0, 0)
     path_rules = bpf.get_table("path_rules")
 
-    path_rules[PathRuleKey(bytes("/", encoding="utf-8"))] = PathRule(bytes("/" + (MAX_PATH_LEN - 1) * ' ', encoding="utf-8"), 1, 1)
-    path_rules[PathRuleKey(bytes("/aa", encoding="utf-8"))] = PathRule(bytes("/" + (MAX_PATH_LEN - 1) * ' ', encoding="utf-8"), 1, 0)
+    path_rules[PathRuleKey(bytes("/", encoding="utf-8"))] = PathRule(bytes("/" + (MAX_PATH_LEN - 1) * ' ', encoding="utf-8"), 1, 1, 5000)
+    path_rules[PathRuleKey(bytes("/aa", encoding="utf-8"))] = PathRule(bytes("/" + (MAX_PATH_LEN - 1) * ' ', encoding="utf-8"), 1, 0, 500)
 
     print("allocate memory for ebpf string pool finish!")
 

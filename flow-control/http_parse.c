@@ -44,7 +44,10 @@ struct long_str {
 struct path_rule {
 	char path_str[MAX_PATH_LEN];
 	int length;
+	// limit qps
 	int qps;
+	// time window ms
+	u64 interval;
 };
 
 struct path_rule_key {
@@ -229,44 +232,44 @@ int http_filter(struct __sk_buff *skb) {
 		count = true;
 	}
 	
+	u64 init_inv = 0;
+	u64* inv = inv_map.lookup_or_try_init(&key1, &init_inv);
+	if (!inv) {
+		return 0;
+	}
 	// record time
+	bool limited = false;
+
 	if (count) {
 		u64 ns = bpf_ktime_get_boot_ns();
 		u64* now = ts_map.lookup_or_try_init(&key1, &ns);
-		if (now) {
+		if (l && now && pat) {
+			bpf_trace_printk("ns is %llu, now is %llu, interval %llu\n", ns, *now, pat->interval);
+			bpf_spin_lock(&l->semaphore);
+			if (ns < *now + pat->interval * 1000000) {
+				*inv = *inv + 1;
+				if (*inv > pat->qps) {
+					limited = true;
+				}
+			} else {
+				// reset counter
+				*inv = 1;
+			}
 			*now = ns;
+			bpf_spin_unlock(&l->semaphore);
 		}
-	}
-	
-	u64 init_inv = 0;
-	u64* inv = inv_map.lookup_or_try_init(&key1, &init_inv);
-	if (l && count) {
-		bpf_spin_lock(&l->semaphore);
-		if (inv) {
-			*inv = *inv + 1;
-		}
-		bpf_spin_unlock(&l->semaphore);
 	}
 
-	bool over = false;
-	if (inv) {
-		if (*inv > pat->qps) {
-			// TODO: Rate limit action
-			//void *ip_ptr = skb_network_header(skb);
-        	// 修改目标IP地址为192.168.10.10
-			bpf_trace_printk("Rate was limited %x \n");
-			over = true;
-		}
-	}
-	
 	if (session_str) {
 		if (count || session_str->index >= MAX_STR_LEN) {
 			session_str->index = 0;
 		}
 		session_str_map.update(&session_key, session_str);
 	}
+
 	struct block_exception event = {};
-	if (over) {
+	if (limited) {
+		bpf_trace_printk("Drop packet");
 		goto DROP;
 	}
 	return 0;
